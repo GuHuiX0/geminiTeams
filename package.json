@@ -1,0 +1,38 @@
+{
+  "name": "living-agent-runtime",
+  "version": "0.1.0",
+  "description": "A latency-first Gemini runtime: persistent tasks, ephemeral workers, progressive artifacts.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "living": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.check.json",
+    "test": "tsx --test test/*.test.ts",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "demo": "tsx examples/demo.ts",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@google/genai": "2.31.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  },
+  "license": "UNLICENSED"
+}
