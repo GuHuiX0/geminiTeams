@@ -212,3 +212,20 @@ test('redirected tasks can reuse historical artifacts without accepting stale ou
   await until(() => runtime.get(task.id).state === 'completed');
   assert.ok(historical); assert.equal(runtime.artifacts(task.id).length, 2);
 });
+
+test('a job-start observer can cancel before any model request is sent', async t => {
+  let calls = 0;
+  const { runtime, store } = fixture(t, provider(() => { calls++; return answer(); }));
+  store.onEvent(event => { if (event.kind === 'job.started' && event.taskId) runtime.cancel(event.taskId); });
+  runtime.start(); const task = runtime.submit({ intent: 'Cancel on dispatch', policy: 'instant' });
+  await until(() => runtime.get(task.id).state === 'cancelled'); await delay(10);
+  assert.equal(calls, 0); assert.equal(runtime.artifacts(task.id).length, 0);
+});
+
+test('a runtime that failed to start cannot release another runtime ownership', async t => {
+  const { runtime, store, path } = fixture(t, provider(() => answer())); runtime.start();
+  const sharing = new Runtime(store, provider(() => answer()));
+  assert.throws(() => sharing.start(), /already has a runtime owner/); await sharing.stop();
+  const separateStore = new Store(path); const other = new Runtime(separateStore, provider(() => answer()));
+  assert.throws(() => other.start(), /already owns/); separateStore.close();
+});

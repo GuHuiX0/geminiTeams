@@ -16,6 +16,7 @@ export class Runtime {
   private active = new Map<string, Active>();
   private interval: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
+  private ownsStore = false;
   constructor(readonly store: Store, readonly provider: ModelProvider,
     options: Partial<RuntimeConfig> = {}, tools = new ToolRegistry()) {
     this.config = runtimeConfigSchema.parse(options); this.tools = tools;
@@ -23,8 +24,8 @@ export class Runtime {
   start(): this {
     if (this.interval) return this;
     if (this.stopped) throw new Error('A stopped Runtime cannot be restarted; construct a new instance.');
-    this.store.acquireOwner();
-    try { this.recover(); } catch (error) { this.store.releaseOwner(); throw error; }
+    this.store.acquireOwner(); this.ownsStore = true;
+    try { this.recover(); } catch (error) { this.store.releaseOwner(); this.ownsStore = false; throw error; }
     this.interval = setInterval(() => this.safeTick(), this.config.tickMs);
     this.safeTick(); return this;
   }
@@ -41,7 +42,7 @@ export class Runtime {
       this.store.append(null, 'runtime.stopped', {});
     });
     await Promise.all([...this.active.values()].map(a => a.promise));
-    this.store.releaseOwner();
+    if (this.ownsStore) { this.store.releaseOwner(); this.ownsStore = false; }
   }
   submit(input: TaskInput): Task {
     const data = taskInputSchema.parse(input); const now = Date.now();
@@ -269,16 +270,16 @@ export class Runtime {
   }
   private launch(job: Job): void {
     const task = this.get(job.taskId); const abort = new AbortController();
-    this.store.transaction(() => {
+    const entry: Active = { taskId: task.id, lane: task.lane, abort, promise: Promise.resolve() };
+    this.active.set(job.id, entry);
+    try { this.store.transaction(() => {
       job.state = 'running'; job.attempts++; job.wakeVersion = task.wakeVersion;
       if (job.kind !== 'tool') task.calls++;
       task.virtualRuntime += 1 / task.priority; task.updatedAt = Date.now();
       this.store.put('jobs', job); this.store.put('tasks', task);
       this.store.append(task.id, 'job.started', { jobId: job.id, kind: job.kind, attempt: job.attempts });
-    });
-    // Install the active entry before executing any asynchronous provider code.
-    const entry: Active = { taskId: task.id, lane: task.lane, abort, promise: Promise.resolve() };
-    this.active.set(job.id, entry);
+    }); } catch (error) { this.active.delete(job.id); throw error; }
+    // Observers may pause or cancel on job.started; their signal is already installed.
     entry.promise = this.execute(task, job, abort.signal).finally(() => {
       this.active.delete(job.id); this.safeTick();
     });
