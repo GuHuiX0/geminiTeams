@@ -48,3 +48,30 @@ test('binding on all interfaces requires explicit API authentication', async t =
   const { runtime } = fixture(t, provider(() => answer()));
   await assert.rejects(serve(runtime, { host: '0.0.0.0', port: 0 }), /bearer token/);
 });
+
+test('panel is served locally; API accepts same-origin requests and rejects DNS rebinding', async t => {
+  const { runtime } = fixture(t, provider(() => answer())); runtime.start();
+  const server = await serve(runtime, { port: 0, token: 'panel-secret' });
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const page = await fetch(base); assert.equal(page.status, 200); assert.match(await page.text(), /Task workspace/);
+  assert.match(page.headers.get('content-security-policy')!, /script-src 'self'/);
+  assert.equal((await fetch(base + '/snapshot')).status, 401);
+  const headers = { authorization: 'Bearer panel-secret', origin: base, 'content-type': 'application/json' };
+  assert.equal((await fetch(base + '/tasks', { method: 'POST', headers, body: JSON.stringify({ intent: 'Browser task' }) })).status, 202);
+  const snapshot = await fetch(base + '/snapshot', { headers }); assert.equal(snapshot.status, 200);
+  const value = await snapshot.json() as { cursor: number; tasks: unknown[] }; assert.ok(value.cursor > 0); assert.equal(value.tasks.length, 1);
+  const rebinding = await fetch(base + '/health', { headers: { authorization: 'Bearer panel-secret', host: 'attacker.example', origin: 'http://attacker.example' } });
+  assert.equal(rebinding.status, 403);
+});
+
+test('history pagination returns older events without gaps or duplicated boundaries', async t => {
+  const { runtime, store } = fixture(t, provider(() => answer())); runtime.start();
+  const task = runtime.submit({ intent: 'History task' }); await until(() => runtime.get(task.id).state === 'completed');
+  const server = await serve(runtime, { port: 0 }); t.after(() => { server.closeAllConnections(); server.close(); });
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const latest = await (await fetch(`${base}/history?taskId=${task.id}&limit=3`)).json() as { events: { seq: number }[]; hasMore: boolean };
+  assert.equal(latest.events.length, 3); assert.equal(latest.hasMore, true);
+  const older = await (await fetch(`${base}/history?taskId=${task.id}&before=${latest.events[0]!.seq}&limit=100`)).json() as { events: { seq: number }[] };
+  assert.deepEqual([...older.events, ...latest.events].map(e => e.seq), store.events(0, task.id).map(e => e.seq));
+});

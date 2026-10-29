@@ -122,6 +122,32 @@ export class Runtime {
     });
     this.abortTask(id); return task;
   }
+  retryJob(id: string, extraCalls = 0): Task {
+    const extra = z.number().int().min(0).max(1000).parse(extraCalls);
+    const job = this.store.require('jobs', id); const task = this.get(job.taskId);
+    if (job.state !== 'failed' || job.revision !== task.revision || ['completed', 'cancelled'].includes(task.state)) {
+      throw new ConflictError('Only a failed step in an unfinished current revision can be retried.');
+    }
+    if (job.kind === 'tool' && this.tools.effect(job.tool!) !== 'read') throw new ConflictError('Write operations require outcome reconciliation.');
+    const jobs = this.jobs(task.id);
+    if (jobs.some(j => j.state === 'uncertain')) throw new ConflictError('Reconcile uncertain writes first.');
+    const dependentIds = new Set<string>([job.id]);
+    for (let pass = 0; pass < jobs.length; pass++) for (const candidate of jobs) {
+      if ((candidate.parentId && dependentIds.has(candidate.parentId)) || candidate.dependsOn.some(d => dependentIds.has(d))) dependentIds.add(candidate.id);
+    }
+    if (jobs.some(j => j.id !== id && dependentIds.has(j.id) && j.state !== 'queued')) {
+      throw new ConflictError('Dependent work has already run. Start a new task to reconsider those results.');
+    }
+    if (job.kind !== 'tool' && task.calls >= task.maxCalls + extra) throw new ConflictError('Add model calls to retry this step.');
+    this.store.transaction(() => {
+      job.state = 'queued'; job.error = null; job.result = null; job.output = ''; job.availableAt = Date.now();
+      job.retryLimit = job.attempts + this.config.maxAttempts; this.store.put('jobs', job);
+      task.state = 'active'; task.stopReason = null; task.maxCalls += extra;
+      task.activeSince = Date.now(); task.updatedAt = Date.now(); this.store.put('tasks', task);
+      this.store.append(task.id, 'job.retried', { jobId: id, extraCalls: extra, preservedJobs: jobs.filter(j => j.state === 'completed').length });
+    });
+    this.safeTick(); return this.get(task.id);
+  }
   reconcile(jobId: string, observedResult: string): void {
     const result = z.string().min(1).max(100000).parse(observedResult);
     const job = this.store.require('jobs', jobId);
@@ -181,11 +207,13 @@ export class Runtime {
       dueAt: Math.min(now + delay, (old?.firstAt ?? now) + Math.max(100, delay * 5)), state: 'pending' });
   }
   private enqueue(task: Task, kind: Job['kind'], instruction: string,
-    dependsOn: string[] = [], tool: string | null = null, inputJson: string | null = null): string {
+    dependsOn: string[] = [], tool: string | null = null, inputJson: string | null = null, parentId: string | null = null): string {
     const job: Job = { id: uid(), taskId: task.id, revision: task.revision, kind, instruction,
-      tool, inputJson, wakeVersion: task.wakeVersion, dependsOn, state: 'queued', attempts: 0,
-      availableAt: Date.now(), result: null, error: null, createdAt: Date.now() };
-    this.store.put('jobs', job); return job.id;
+      tool, inputJson, parentId, wakeVersion: task.wakeVersion, dependsOn, state: 'queued', attempts: 0,
+      availableAt: Date.now(), result: null, error: null, createdAt: Date.now(), output: '', retryLimit: this.config.maxAttempts };
+    this.store.put('jobs', job);
+    this.store.append(task.id, 'job.queued', { jobId: job.id, kind, instruction, parentId, dependsOn, revision: task.revision });
+    return job.id;
   }
   private abortTask(id: string): void {
     for (const active of this.active.values()) if (active.taskId === id) active.abort.abort(new Error('Task interrupted'));
@@ -274,10 +302,11 @@ export class Runtime {
     this.active.set(job.id, entry);
     try { this.store.transaction(() => {
       job.state = 'running'; job.attempts++; job.wakeVersion = task.wakeVersion;
+      job.startedAt = Date.now(); delete job.finishedAt; job.output = ''; job.outputAttempt = job.attempts;
       if (job.kind !== 'tool') task.calls++;
       task.virtualRuntime += 1 / task.priority; task.updatedAt = Date.now();
       this.store.put('jobs', job); this.store.put('tasks', task);
-      this.store.append(task.id, 'job.started', { jobId: job.id, kind: job.kind, attempt: job.attempts });
+      this.store.append(task.id, 'job.started', { jobId: job.id, kind: job.kind, attempt: job.attempts, revision: job.revision, instruction: job.instruction });
     }); } catch (error) { this.active.delete(job.id); throw error; }
     // Observers may pause or cancel on job.started; their signal is already installed.
     entry.promise = this.execute(task, job, abort.signal).finally(() => {
@@ -289,7 +318,7 @@ export class Runtime {
       artifacts: this.artifacts(task.id).slice(-5)
         .map(a => ({ ...a, body: a.body.slice(0, 16000) })),
       observations: this.jobs(task.id).filter(j => j.kind !== 'controller' && settled(j))
-        .slice(-20).map(j => ({ instruction: (j.revision === task.revision ? '' : `[Historical revision ${j.revision}] `) + j.instruction, result: (j.result ?? `Failed: ${j.error}`).slice(0, 12000) })),
+        .slice(-20).map(j => ({ jobId: j.id, instruction: (j.revision === task.revision ? '' : `[Historical revision ${j.revision}] `) + j.instruction, result: (j.result ?? `Failed: ${j.error}`).slice(0, 12000) })),
       memory: this.store.all('memory').filter(m => m.taskId === task.id).slice(-20),
       mailbox: this.store.all('deliveries').filter(d => d.taskId === task.id && d.state === 'delivered').slice(-10).map(d => d.event),
       tools: this.tools.descriptions(task.allowedTools), };
@@ -297,31 +326,56 @@ export class Runtime {
   private async execute(task: Task, job: Job, parentSignal: AbortSignal): Promise<void> {
     const signal = AbortSignal.any([parentSignal, AbortSignal.timeout(this.config.jobTimeoutMs)]);
     let onAbort: (() => void) | undefined;
+    let acceptingOutput = true;
+    let outputBuffer = ''; let outputTimer: ReturnType<typeof setTimeout> | undefined;
+    const flushOutput = () => {
+      if (outputTimer) clearTimeout(outputTimer); outputTimer = undefined;
+      if (!outputBuffer) return;
+      const text = outputBuffer; outputBuffer = '';
+      const latest = this.get(task.id); const saved = this.store.require('jobs', job.id);
+      if (latest.revision !== job.revision || latest.state !== 'active' || saved.state !== 'running' || saved.attempts !== job.attempts) return;
+      this.store.transaction(() => {
+        job.output = (job.output ?? '') + text;
+        saved.output = job.output; saved.outputAttempt = job.attempts; this.store.put('jobs', saved);
+        this.store.append(task.id, 'job.output', { jobId: job.id, attempt: job.attempts, revision: job.revision, text });
+      });
+    };
+    const onText = (text: string) => {
+      if (!acceptingOutput || signal.aborted) return;
+      outputBuffer += text.slice(0, Math.max(0, 100000 - (job.output?.length ?? 0) - outputBuffer.length));
+      if (outputBuffer.length >= 1024) flushOutput();
+      else if (!outputTimer) outputTimer = setTimeout(flushOutput, 60);
+    };
     try {
       parentSignal.throwIfAborted();
+      const request = this.context(task, job);
+      job.basedOn = { intent: request.task.intent, memory: request.memory, artifactIds: request.artifacts.map(a => a.id),
+        jobIds: request.observations.flatMap(o => o.jobId ? [o.jobId] : []), eventIds: request.mailbox.map(e => e.id) };
+      this.store.put('jobs', job);
       const operation = job.kind === 'tool'
         ? this.tools.execute(job.tool!, job.inputJson!, task.allowedTools,
           { taskId: task.id, jobId: job.id, idempotencyKey: job.id, signal })
-        : this.provider.execute(this.context(task, job), signal);
+        : this.provider.execute(request, signal, onText);
       const result = await Promise.race([operation, new Promise<never>((_, reject) => {
         onAbort = () => reject(signal.reason); signal.addEventListener('abort', onAbort, { once: true });
         if (signal.aborted) onAbort();
       })]);
-      signal.throwIfAborted();
+      flushOutput(); signal.throwIfAborted();
       const current = this.get(task.id); const savedJob = this.store.require('jobs', job.id);
       if (current.revision !== job.revision || current.state !== 'active' || savedJob.state !== 'running') return;
       this.store.transaction(() => {
         if (job.kind === 'controller') this.applyDecision(current, job, decisionSchema.parse(result));
         else if (typeof result !== 'string') throw new Error('Worker must return a string');
         job.state = 'completed'; job.result = typeof result === 'string' ? result.slice(0, 100000) : JSON.stringify(result);
-        job.error = null; this.store.put('jobs', job);
+        job.error = null; job.finishedAt = Date.now(); this.store.put('jobs', job);
         this.store.append(task.id, 'job.completed', { jobId: job.id, kind: job.kind });
       });
     } catch (error) {
+      flushOutput();
       const current = this.get(task.id); const saved = this.store.require('jobs', job.id);
       if (current.revision !== job.revision || current.state !== 'active' || saved.state !== 'running') return;
       this.store.transaction(() => {
-        job.error = errorText(error);
+        job.error = errorText(error); job.finishedAt = Date.now();
         if (job.kind === 'tool' && this.tools.effect(job.tool!) !== 'read') {
           job.state = 'uncertain'; this.store.put('jobs', job);
           // Pause and checkpoint every sibling too; no running job may become orphaned.
@@ -329,7 +383,7 @@ export class Runtime {
           const paused = this.get(task.id); paused.stopReason = 'Write outcome needs reconciliation';
           this.store.put('tasks', paused);
           this.store.append(task.id, 'tool.uncertain', { jobId: job.id, error: job.error, attention: 'decision' });
-        } else if (job.attempts < this.config.maxAttempts && !parentSignal.aborted) {
+        } else if (job.attempts < (job.retryLimit ?? this.config.maxAttempts) && !parentSignal.aborted) {
           job.state = 'queued'; job.availableAt = Date.now() + Math.min(10000, 250 * 2 ** (job.attempts - 1)) + Math.floor(Math.random() * 100);
           this.store.append(task.id, 'job.retry', { jobId: job.id, error: job.error, availableAt: job.availableAt });
         } else {
@@ -342,7 +396,7 @@ export class Runtime {
         }
         this.store.put('jobs', job);
       });
-    } finally { if (onAbort) signal.removeEventListener('abort', onAbort); }
+    } finally { acceptingOutput = false; if (outputTimer) clearTimeout(outputTimer); if (onAbort) signal.removeEventListener('abort', onAbort); }
   }
   private applyDecision(task: Task, job: Job, decision: Decision): void {
     if (decision.next !== 'continue' && decision.operations.length) throw new Error('Terminal/wait decisions cannot request operations');
@@ -353,10 +407,10 @@ export class Runtime {
       if (op.kind === 'tool') this.tools.validate(op.tool ?? '', op.inputJson ?? '', task.allowedTools);
     }
     if (decision.artifact) {
-      const artifact: Artifact = { ...decision.artifact, id: uid(), taskId: task.id, revision: task.revision, createdAt: Date.now() };
+      const artifact: Artifact = { ...decision.artifact, id: uid(), taskId: task.id, revision: task.revision, createdAt: Date.now(), jobId: job.id };
       if (!artifact.evidence.length) artifact.confidence = 'unverified';
       this.store.put('artifacts', artifact); task.latestArtifactId = artifact.id;
-      this.store.append(task.id, 'artifact.published', { artifact, attention: 'passive',
+      this.store.append(task.id, 'artifact.published', { artifact, jobId: job.id, attention: 'passive',
         timeToFirstUsefulResultMs: this.artifacts(task.id).length === 1 ? Date.now() - task.createdAt : null });
     }
     const requiredCalls = decision.operations.filter(o => o.kind === 'reason').length + 1;
@@ -368,15 +422,16 @@ export class Runtime {
         task.lane = 'background';
         this.store.append(task.id, 'task.escalated', { lane: task.lane, reason: 'Further work continues in background capacity' });
       }
-      const dependencies = decision.operations.map(op => this.enqueue(task, op.kind, op.instruction, [], op.tool, op.inputJson));
+      const dependencies = decision.operations.map(op => this.enqueue(task, op.kind, op.instruction, [], op.tool, op.inputJson, job.id));
       this.enqueue(task, 'controller', 'Synthesize new observations. Improve the artifact only if useful; stop when sufficient.', dependencies);
     } else if (task.wakeVersion > job.wakeVersion) {
-      this.enqueue(task, 'controller', 'An event arrived during the last call. Reassess the latest mailbox before stopping.');
+      this.enqueue(task, 'controller', 'An event arrived during the last call. Reassess the latest mailbox before stopping.', [], null, null, job.id);
     } else {
       task.state = decision.next === 'wait' ? 'waiting' : 'completed'; task.stopReason = decision.reason;
       this.store.append(task.id, task.state === 'waiting' ? 'task.waiting' : 'task.completed',
         { reason: decision.reason, attention: task.state === 'completed' ? 'notify' : 'passive' });
     }
+    this.store.append(task.id, 'decision.recorded', { jobId: job.id, revision: task.revision, next: decision.next, reason: decision.reason, artifactId: task.latestArtifactId });
     task.updatedAt = Date.now(); this.store.put('tasks', task);
   }
 }

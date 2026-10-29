@@ -2,6 +2,8 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
+import { panelAsset } from './panel.js';
+import { DemoProvider, GeminiProvider } from './providers.js';
 import { Runtime } from './runtime.js';
 import { ConflictError, NotFoundError } from './types.js';
 
@@ -37,14 +39,55 @@ export async function serve(runtime: Runtime, options: ServerOptions = {}): Prom
     });
   });
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    // Browser pages cannot use a local runtime through ambient cookies or CORS.
-    if (req.headers.origin) { json(res, 403, { error: 'Browser origins are not accepted by this headless API.' }); return; }
-    if (token && !authorized(req.headers.authorization, token)) { json(res, 401, { error: 'Bearer token required' }); return; }
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('referrer-policy', 'no-referrer');
+    res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
+    let requestHost: URL;
+    try { requestHost = new URL('http://' + req.headers.host); } catch { json(res, 403, { error: 'Invalid host' }); return; }
+    if (['127.0.0.1', '::1', 'localhost'].includes(host) && !['127.0.0.1', '[::1]', 'localhost'].includes(requestHost.hostname)) {
+      json(res, 403, { error: 'Local runtime requires a loopback host' }); return;
+    }
+    if (req.headers.origin && req.headers.origin !== requestHost.origin) {
+      json(res, 403, { error: 'Cross-origin requests are not accepted.' }); return;
+    }
     const url = new URL(req.url ?? '/', 'http://localhost');
     const path = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
     const method = req.method ?? 'GET';
+    // Public assets contain no task data; API access still requires the configured token.
+    if (method === 'GET' && panelAsset(url.pathname, res)) return;
+    if (token && !authorized(req.headers.authorization, token)) { json(res, 401, { error: 'Bearer token required' }); return; }
+    const taskDetail = (id: string) => ({ task: runtime.get(id), artifacts: runtime.artifacts(id), jobs: runtime.jobs(id),
+      memory: runtime.store.all('memory').filter(m => m.taskId === id),
+      subscriptions: runtime.store.all('subscriptions').filter(s => s.taskId === id),
+      timers: runtime.store.all('timers').filter(t => t.taskId === id) });
+    if (method === 'GET' && url.pathname === '/snapshot') {
+      const taskId = url.searchParams.get('taskId');
+      json(res, 200, { cursor: runtime.store.cursor(), tasks: runtime.list(),
+        jobs: runtime.store.all('jobs').map(({ result, output, basedOn, inputJson, ...summary }) => summary),
+        selected: taskId ? taskDetail(taskId) : null,
+        events: runtime.store.history(taskId ?? undefined, Number.MAX_SAFE_INTEGER, 300),
+        config: runtime.config, demo: runtime.provider instanceof DemoProvider,
+        model: runtime.provider instanceof GeminiProvider ? runtime.provider.model : runtime.provider instanceof DemoProvider ? 'Offline demo' : 'Custom provider' }); return;
+    }
+    if (method === 'GET' && url.pathname === '/history') {
+      const taskId = url.searchParams.get('taskId') ?? undefined;
+      if (taskId) runtime.get(taskId);
+      const before = z.coerce.number().int().nonnegative().parse(url.searchParams.get('before') ?? Number.MAX_SAFE_INTEGER);
+      const limit = z.coerce.number().int().min(1).max(1000).parse(url.searchParams.get('limit') ?? 300);
+      const events = runtime.store.history(taskId, before, limit + 1);
+      json(res, 200, { events: events.slice(-limit), hasMore: events.length > limit }); return;
+    }
+    if (method === 'POST' && url.pathname === '/demo/scenario') {
+      if (!(runtime.provider instanceof DemoProvider)) throw new ConflictError('Demo scenarios require --demo mode.');
+      const input = fields.parse(await body(req));
+      const task = runtime.submit({ intent: 'Compare architectures for a persistent research assistant', policy: 'deep' });
+      if (input.debug === true) runtime.provider.failNextSynthesis(task.id, runtime.config.maxAttempts);
+      const quick = runtime.submit({ intent: 'Summarize the constraints for an always-on agent', policy: 'instant' });
+      const persistent = runtime.submit({ intent: 'Track evidence for an event-driven agent runtime', policy: 'persistent' });
+      json(res, 202, { taskId: task.id, taskIds: [task.id, quick.id, persistent.id] }); return;
+    }
     if (method === 'GET' && url.pathname === '/health') {
-      json(res, 200, { ok: true, tasks: runtime.list().length, config: runtime.config }); return;
+      json(res, 200, { ok: true, tasks: runtime.list().length, config: runtime.config, panel: true, demo: runtime.provider instanceof DemoProvider }); return;
     }
     if (method === 'GET' && url.pathname === '/events') {
       const after = Number(req.headers['last-event-id'] ?? url.searchParams.get('after') ?? 0);
@@ -77,8 +120,7 @@ export async function serve(runtime: Runtime, options: ServerOptions = {}): Prom
     if (path[0] === 'tasks' && path[1]) {
       const id = path[1]; const action = path[2];
       if (method === 'GET' && !action) {
-        json(res, 200, { task: runtime.get(id), artifacts: runtime.artifacts(id), jobs: runtime.jobs(id),
-          memory: runtime.store.all('memory').filter(m => m.taskId === id) }); return;
+        json(res, 200, taskDetail(id)); return;
       }
       if (method === 'POST') {
         const input = fields.parse(await body(req)); let result: unknown;
@@ -98,6 +140,10 @@ export async function serve(runtime: Runtime, options: ServerOptions = {}): Prom
     if (method === 'DELETE' && ['subscriptions', 'timers'].includes(path[0] ?? '') && path[1]) {
       const table = path[0] as 'subscriptions' | 'timers'; runtime.store.require(table, path[1]);
       runtime.store.remove(table, path[1]); json(res, 200, { ok: true }); return;
+    }
+    if (method === 'POST' && path[0] === 'jobs' && path[1] && path[2] === 'retry') {
+      const input = fields.parse(await body(req));
+      json(res, 200, runtime.retryJob(path[1], input.extraCalls === undefined ? 0 : number(input.extraCalls))); return;
     }
     if (method === 'POST' && path[0] === 'jobs' && path[1] && path[2] === 'reconcile') {
       const input = fields.parse(await body(req)); runtime.reconcile(path[1], text(input.result)); json(res, 200, { ok: true }); return;

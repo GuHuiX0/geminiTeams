@@ -83,4 +83,16 @@ The first **accepted** controller response must contain an artifact. This enforc
 
 ## Expansion points
 
-Add source adapters through `/ingest`, tool adapters through `ToolRegistry`, and alternative model backends through `ModelProvider`. Next milestones are indexed ready queues and retention policies for large histories, an interactive client, automatic policy suggestions, task-specific verification adapters, and distributed durable job leases. Any learned value-of-compute policy should be evaluated against time to first useful result, final quality, intervention count, and human review time.
+Add source adapters through `/ingest`, tool adapters through `ToolRegistry`, and alternative model backends through `ModelProvider`. Next milestones are source configuration and acquisition adapters, indexed ready queues and retention policies for large histories, automatic policy suggestions, task-specific verification adapters, and distributed durable job leases. Any learned value-of-compute policy should be evaluated against time to first useful result, final quality, intervention count, and human review time.
+
+## Local task workspace and response streaming
+
+The HTTP process now serves the local task panel as well as the API. Its overview, results, execution, and activity views retain one selected task/step across navigation. The execution map uses recorded parent/dependency links; the inspector exposes recorded decisions and bounded input references. See [the interaction model](panel.md).
+
+`ModelProvider.execute` accepts an optional response-text callback. Gemini uses streaming generation when the runtime supplies that callback. Plain answers and worker findings stream directly; controller JSON is incrementally decoded to expose only its artifact body. A complete decision still passes schema and lifecycle checks before publication. Thought parts are excluded. Finish status and source metadata are retained even if the stream ends with a metadata-only frame.
+
+Visible output is provisional, revision/attempt scoped, and batched into durable `job.output` events. The current job also keeps bounded accumulated text for reloads. Callback output after abort or completion is ignored, and each accepted batch checks the current revision and running attempt. Full structured controller decisions remain inspectable after completion.
+
+A manual retry can requeue a failed model/read step in the current unfinished revision when its descendants have not executed and no write outcome is uncertain. It preserves completed independent work, adds an explicit audit event, and keeps attempt numbers increasing. Task cancellation and completed downstream results prevent selective retry.
+
+Source configuration and source acquisition adapters remain a proposed next milestone; see [persistent monitoring](monitoring-proposal.md). This panel milestone does not add shell execution or modify the filesystem toolset.

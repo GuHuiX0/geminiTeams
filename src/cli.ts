@@ -57,7 +57,7 @@ async function main(): Promise<void> {
     if (values['allow-writes'] && !workspace) throw new Error('--allow-writes requires --workspace');
     const tools = workspace ? fileTools(workspace, values['allow-writes'] === true) : new ToolRegistry();
     const model = value('model');
-    const runtime = new Runtime(store, values.demo ? new DemoProvider() : new GeminiProvider({ ...(model ? { model } : {}), search: values['ground-search'] === true }), {
+    const runtime = new Runtime(store, values.demo ? new DemoProvider({ chunkDelayMs: 35 }) : new GeminiProvider({ ...(model ? { model } : {}), search: values['ground-search'] === true }), {
       interactiveSlots: numeric('interactive-slots', 2), backgroundSlots: numeric('background-slots', 8),
       maxWorkersPerTask: numeric('workers-per-task', 4), debounceMs: numeric('debounce-ms', 500),
       jobTimeoutMs: numeric('timeout-ms', 120000),
@@ -69,6 +69,7 @@ async function main(): Promise<void> {
     } catch (error) { await runtime.stop(); store.close(); throw error; }
     const bound = server.address() as AddressInfo;
     console.log(`Living runtime listening on ${bound.address}:${bound.port}${values.demo ? ' [OFFLINE DEMO]' : ''}`);
+    console.log(`Open the panel: http://${bound.address.includes(':') ? '[' + bound.address + ']' : bound.address}:${bound.port}`);
     let closing = false;
     const shutdown = async () => {
       if (closing) return; closing = true;

@@ -65,3 +65,43 @@ test('optional search grounding is limited to workers and preserves returned sou
   assert.match(result as string, /https:\/\/example.com\/source/);
   assert.ok(payload?.tools);
 });
+
+test('real Gemini SDK streams visible artifact text before the structured response finishes', async t => {
+  let finish!: () => void; let seen = '';
+  const decision = answer('An early answer with a conclusion');
+  const payload = JSON.stringify(decision); const split = payload.indexOf(' with a conclusion');
+  const gemini = new GeminiProvider({ apiKey: 'test-placeholder', fetch: async () => {
+    const encoder = new TextEncoder();
+    const packet = (text: string, last = false) => encoder.encode('data: ' + JSON.stringify({ candidates: [
+      { content: { role: 'model', parts: [{ text }] }, ...(last ? { finishReason: 'STOP' } : {}) },
+    ] }) + '\n\n');
+    return new Response(new ReadableStream({ start(controller) {
+      controller.enqueue(packet(payload.slice(0, split)));
+      finish = () => { controller.enqueue(packet(payload.slice(split), true)); controller.close(); };
+    } }), { headers: { 'content-type': 'text/event-stream' } });
+  } });
+  const result = gemini.execute(request(t), new AbortController().signal, text => { seen += text; });
+  for (let i = 0; i < 100 && !seen; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(seen, 'An early answer'); finish();
+  assert.deepEqual(await result, decision); assert.equal(seen, decision.artifact!.body);
+});
+
+test('stream metadata-only tails cannot hide truncation or an incomplete response', async t => {
+  for (const finishReason of ['MAX_TOKENS', undefined]) {
+    const gemini = new GeminiProvider({ apiKey: 'test-placeholder', fetch: async () => new Response([
+      { candidates: [{ content: { parts: [{ text: 'Partial response' }] }, ...(finishReason ? { finishReason } : {}) }] },
+      { usageMetadata: { totalTokenCount: 10 } },
+    ].map(chunk => 'data: ' + JSON.stringify(chunk) + '\n\n').join(''), { headers: { 'content-type': 'text/event-stream' } }) });
+    await assert.rejects(gemini.execute(request(t, 'instant'), new AbortController().signal, () => {}), /did not finish normally|without a completion signal/);
+  }
+});
+
+test('grounding sources are retained across streamed chunks and metadata tails', async t => {
+  const gemini = new GeminiProvider({ apiKey: 'test-placeholder', search: true, fetch: async () => new Response([
+    { candidates: [{ content: { parts: [{ text: 'A finding' }] }, groundingMetadata: { groundingChunks: [{ web: { title: 'Source', uri: 'https://example.com/primary' } }] } }] },
+    { candidates: [{ finishReason: 'STOP' }] }, { usageMetadata: { totalTokenCount: 10 } },
+  ].map(chunk => 'data: ' + JSON.stringify(chunk) + '\n\n').join(''), { headers: { 'content-type': 'text/event-stream' } }) });
+  const input = request(t); input.job.kind = 'reason';
+  const output = await gemini.execute(input, new AbortController().signal, () => {});
+  assert.match(output as string, /https:\/\/example.com\/primary/);
+});

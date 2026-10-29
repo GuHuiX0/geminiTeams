@@ -39,8 +39,10 @@ Implement the `ModelProvider` interface:
 import type { ModelProvider } from '../src/index.js';
 
 const provider: ModelProvider = {
-  async execute(request, signal) {
+  async execute(request, signal, onText) {
     signal.throwIfAborted();
+    // Call onText?.(chunk) as user-visible response text arrives.
+    // Return the complete string or validated decision when the call finishes.
     if (request.job.kind === 'reason') return 'Worker findings, uncertainty, and source references';
     return {
       artifact: { title: 'Useful result', body: 'An answer for the current intent', confidence: 'unverified', evidence: [] },

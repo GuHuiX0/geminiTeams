@@ -90,6 +90,16 @@ export class Store {
     return rows.map(row => ({ seq: Number(row.seq), taskId: row.task_id as string | null,
       kind: row.kind as string, data: JSON.parse(row.data as string), createdAt: Number(row.created_at) }));
   }
+  cursor(): number {
+    return Number(this.db.prepare('SELECT COALESCE(MAX(seq),0) AS cursor FROM events').get()!.cursor);
+  }
+  history(taskId?: string, before = Number.MAX_SAFE_INTEGER, limit = 300): RuntimeEvent[] {
+    const rows = taskId
+      ? this.db.prepare('SELECT * FROM events WHERE seq<? AND task_id=? ORDER BY seq DESC LIMIT ?').all(before, taskId, limit)
+      : this.db.prepare('SELECT * FROM events WHERE seq<? ORDER BY seq DESC LIMIT ?').all(before, limit);
+    return rows.reverse().map(row => ({ seq: Number(row.seq), taskId: row.task_id as string | null,
+      kind: row.kind as string, data: JSON.parse(row.data as string), createdAt: Number(row.created_at) }));
+  }
   private emitEvent(event: RuntimeEvent): void {
     for (const listener of this.emitter.listeners('event')) {
       try { (listener as (event: RuntimeEvent) => void)(event); }

@@ -44,10 +44,13 @@ export interface Job {
   instruction: string; tool: string | null; inputJson: string | null; wakeVersion: number;
   dependsOn: string[]; attempts: number; availableAt: number;
   result: string | null; error: string | null; createdAt: number;
+  parentId?: string | null; output?: string; outputAttempt?: number;
+  startedAt?: number; finishedAt?: number; retryLimit?: number;
+  basedOn?: { intent?: string; artifactIds: string[]; jobIds: string[]; eventIds: string[]; memory?: Memory[] };
 }
 export interface Artifact {
   id: string; taskId: string; revision: number; title: string; body: string;
-  confidence: 'unverified' | 'supported'; evidence: string[]; createdAt: number;
+  confidence: 'unverified' | 'supported'; evidence: string[]; createdAt: number; jobId?: string;
 }
 export interface RuntimeEvent {
   seq: number; taskId: string | null; kind: string; data: unknown; createdAt: number;
@@ -73,11 +76,11 @@ export interface ToolDescription {
   name: string; description: string; inputSchema: Record<string, unknown>; effect: 'read' | 'write';
 }
 export interface ModelRequest {
-  task: Task; job: Job; artifacts: Artifact[]; observations: { instruction: string; result: string }[];
+  task: Task; job: Job; artifacts: Artifact[]; observations: { instruction: string; result: string; jobId?: string }[];
   memory: Memory[]; mailbox: InboundEvent[]; tools: ToolDescription[];
 }
 export interface ModelProvider {
-  execute(request: ModelRequest, signal: AbortSignal): Promise<Decision | string>;
+  execute(request: ModelRequest, signal: AbortSignal, onText?: (text: string) => void): Promise<Decision | string>;
 }
 export interface RuntimeConfig {
   interactiveSlots: number; backgroundSlots: number; maxWorkersPerTask: number;

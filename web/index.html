@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <meta
+      name="description"
+      content="Supervise, understand, debug, and steer concurrent work in your local Gemini runtime."
+    />
+    <title>geminiTeams · Task workspace</title>
+    <link rel="stylesheet" href="/panel.css" />
+    <script type="module" src="/panel.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">Skip to workspace</a>
+    <header class="app-header">
+      <button
+        class="mobile-menu"
+        id="mobile-menu"
+        aria-label="Toggle task navigation"
+        aria-expanded="false"
+        aria-controls="task-navigation"
+      >
+        ☰
+      </button>
+      <a class="brand" href="#"
+        ><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span
+        ><span>gemini<span class="brand-light">Teams</span></span
+        ><span class="header-divider"></span
+        ><span class="brand-caption">TASK WORKSPACE</span></a
+      >
+      <div class="header-actions">
+        <span id="mode-badge"></span
+        ><button
+          class="connection-button"
+          id="connection-button"
+          title="Runtime connection"
+        >
+          <span id="connection-dot" class="status-dot waiting"></span
+          ><span id="connection-label">Connecting</span></button
+        ><button class="button primary" id="new-task-top" aria-label="New task">
+          ＋ <span>New task</span><kbd>N</kbd>
+        </button>
+      </div>
+    </header>
+    <div id="connection-banner" role="status" hidden></div>
+    <div class="app-layout">
+      <aside class="sidebar" id="task-navigation" aria-label="Tasks">
+        <div class="sidebar-label">
+          WORKSPACE <span class="local-tag">LOCAL</span>
+        </div>
+        <button class="workspace-link" id="overview-link">
+          <span aria-hidden="true">▦</span> Overview
+          <span id="task-total" class="count">0</span>
+        </button>
+        <div class="sidebar-section">
+          <span>YOUR TASKS</span
+          ><button
+            class="icon-button"
+            id="new-task-side"
+            title="New task"
+            aria-label="New task in workspace"
+          >
+            ＋
+          </button>
+        </div>
+        <label class="search-field"
+          ><span aria-hidden="true">⌕</span
+          ><input
+            id="task-search"
+            type="search"
+            placeholder="Find a task…"
+            aria-label="Find a task"
+        /></label>
+        <div class="task-filters" id="task-filters" aria-label="Task filters">
+          <button data-task-filter="all" class="selected">All</button
+          ><button data-task-filter="active">Active</button
+          ><button data-task-filter="attention">Attention</button>
+        </div>
+        <nav id="task-list" aria-label="Task list"></nav>
+        <div class="sidebar-footer">
+          <div class="sidebar-label">RUNTIME CAPACITY</div>
+          <div id="runtime-capacity"></div>
+          <button class="runtime-info" id="runtime-info">
+            Runtime details <span>↗</span>
+          </button>
+        </div>
+      </aside>
+      <main id="workspace" tabindex="-1">
+        <div class="initial-loading">
+          <span class="spinner"></span> Connecting to your runtime…
+        </div>
+      </main>
+      <aside id="inspector" aria-label="Selected step details" hidden></aside>
+    </div>
+    <dialog id="task-dialog" class="form-dialog">
+      <form id="task-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">DELEGATE WORK</span>
+            <h2>Start a task</h2>
+          </div>
+          <button
+            type="button"
+            class="icon-button close-dialog"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <label for="task-intent">What would you like to accomplish?</label
+        ><textarea
+          id="task-intent"
+          name="intent"
+          rows="5"
+          placeholder="Describe the goal, constraints, and what a useful result would look like…"
+          maxlength="32000"
+          required
+        ></textarea>
+        <label for="task-policy">How should it work?</label
+        ><select id="task-policy" name="policy">
+          <option value="focused">
+            Focused · answer first, expand if useful
+          </option>
+          <option value="instant">Instant · one direct response</option>
+          <option value="deep">Deep · explore independent approaches</option>
+          <option value="persistent">
+            Persistent · work, then wait for new events
+          </option>
+        </select>
+        <details class="advanced">
+          <summary>Execution limits</summary>
+          <div class="form-grid">
+            <label
+              >Model call budget<input
+                id="task-budget"
+                type="number"
+                min="1"
+                max="1000"
+                placeholder="Use policy default" /></label
+            ><label
+              >Parallel workers<input
+                id="task-parallel"
+                type="number"
+                value="3"
+                min="1"
+                max="32"
+            /></label>
+          </div>
+        </details>
+        <p class="form-error" id="task-error" role="alert"></p>
+        <div class="dialog-footer">
+          <span id="task-model-note" class="muted"></span
+          ><button class="button primary" type="submit">
+            Start task <span aria-hidden="true">↗</span>
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="action-dialog" class="form-dialog">
+      <form id="action-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow" id="action-eyebrow">TASK CONTROL</span>
+            <h2 id="action-title"></h2>
+          </div>
+          <button
+            type="button"
+            class="icon-button close-dialog"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <div id="action-description" class="action-description"></div>
+        <div id="action-fields"></div>
+        <p class="form-error" id="action-error" role="alert"></p>
+        <div class="dialog-footer">
+          <button type="button" class="button close-dialog">Keep working</button
+          ><button class="button primary" type="submit" id="action-submit">
+            Continue
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="connection-dialog" class="form-dialog">
+      <form id="connection-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">LOCAL RUNTIME</span>
+            <h2>Connect to your runtime</h2>
+          </div>
+          <button
+            type="button"
+            class="icon-button close-dialog"
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+        <p>
+          This runtime requires a bearer token. Enter the value configured in
+          <code>LIVING_TOKEN</code>. It stays in this browser tab’s session.
+        </p>
+        <label for="runtime-token">Runtime token</label
+        ><input
+          id="runtime-token"
+          type="password"
+          autocomplete="off"
+          required
+        />
+        <p class="form-error" id="connection-error" role="alert"></p>
+        <div class="dialog-footer">
+          <span class="muted">Your Gemini API key stays on the server.</span
+          ><button class="button primary" type="submit">Connect</button>
+        </div>
+      </form>
+    </dialog>
+    <div id="toast" role="status" hidden></div>
+  </body>
+</html>

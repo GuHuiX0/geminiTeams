@@ -2,9 +2,9 @@
 
 **One persistent runtime. Many living tasks. Ephemeral Gemini workers.**
 
-A working, headless TypeScript runtime for quick questions, deep intellectual work, and long-lived projects. It implements the final direction in [the design discussion](https://chatgpt.com/share/6ae0cae6-4f30-83ea-a6ba-360b4f5ce7aa): optimize time to the first useful result, keep background work independent, and preserve tasks between interactions.
+A TypeScript runtime with a local task workspace for quick questions, deep intellectual work, and long-lived projects. It implements the final direction in [the design discussion](https://chatgpt.com/share/6ae0cae6-4f30-83ea-a6ba-360b4f5ce7aa): optimize time to the first useful result, keep background work independent, and preserve tasks between interactions.
 
-[中文快速开始](docs/quickstart.zh-CN.md) · [Architecture and guarantees](docs/architecture.md) · [HTTP API](docs/api.md) · [Extending tools and providers](docs/extending.md)
+[Panel workflow](docs/panel.md) · [中文快速开始](docs/quickstart.zh-CN.md) · [Architecture and guarantees](docs/architecture.md) · [HTTP API](docs/api.md) · [Extending tools and providers](docs/extending.md)
 
 ## Start in two minutes
 
@@ -18,6 +18,16 @@ npm run demo
 
 The demo makes **no network or model calls**. It demonstrates reserved interactive capacity, parallel branches, progressive artifacts, a sleeping persistent task, and event deduplication. Its answers are clearly labeled scripted content.
 
+Open the panel with scripted, offline responses:
+
+```bash
+npm start -- serve --demo --db .living/panel-demo.sqlite
+```
+
+Visit **http://127.0.0.1:7331**. Start a task, or choose **Try a parallel workflow** / **Try a recovery scenario**. These scenarios execute real runtime jobs with explicitly labeled demo outputs; the recovery scenario lets you inspect and retry a failed synthesis while preserving completed workers.
+
+![Local task workspace showing an actual offline execution and its recorded inputs](docs/panel.png)
+
 For real Gemini inference:
 
 ```bash
@@ -27,7 +37,7 @@ export LIVING_MODEL=gemini-flash-latest
 npm start -- serve
 ```
 
-In another terminal:
+The panel is available at the same address. The CLI also works in another terminal:
 
 ```bash
 npm start -- submit "Explain actor models in three sentences" --policy instant --wait
@@ -37,7 +47,7 @@ npm start -- get TASK_ID
 npm start -- events TASK_ID
 ```
 
-`submit` acknowledges the new task immediately. `--wait` prints each new useful artifact as it becomes available; `events` exposes the durable event stream. Without a key, run `npm start -- serve --demo` to try the CLI and API offline.
+`submit` acknowledges the new task immediately. `--wait` prints each new useful artifact as it becomes available; `events` exposes the durable event stream. Without a key, run `npm start -- serve --demo` to try the panel, CLI, and API offline.
 
 Optionally enable Gemini Google Search grounding for **reasoning workers**:
 
@@ -62,7 +72,9 @@ This adds search sources to worker observations. Controllers synthesize those ob
 | Event routing | Explicit subscriptions, deterministic source/type/subject filters, bounded debounce, deduplication, and causal-loop suppression. |
 | Progressive results | Versioned artifacts publish before deeper work finishes; passive progress and completion/decision events remain distinct. |
 | Tool control | Explicit per-task allowlists, schema validation, workspace-scoped file tools, and resource leases. |
-| Interfaces | TypeScript SDK, CLI, local HTTP API, and resumable Server-Sent Events. |
+| Interfaces | Local task workspace, TypeScript SDK, CLI, HTTP API, and resumable Server-Sent Events. |
+| Streaming and inspection | Provisional Gemini response text, dependency maps, recorded decision context, versioned results, and a filterable activity trace. |
+| Selective retry | Retry an eligible failed step when its dependent work has not run; preserve independent completed steps. |
 
 No task consumes inference while `waiting` or `paused`. The scheduler keeps a lightweight timer running to dispatch jobs and durable timers.
 
@@ -145,12 +157,14 @@ Keep one runtime process per database. Other clients use its HTTP API. A databas
 
 ```bash
 npm run check
+npx playwright install chromium
+npm run test:panel
 ```
 
-Checks include strict TypeScript, concurrency and lifecycle tests, a real `SIGKILL`/restart test, durable SSE replay, authorization and filesystem boundary tests, and the Gemini SDK adapter over a mocked HTTP transport. Live Gemini inference requires your credentials and is not part of the offline test suite. GitHub Actions runs the same checks on Node 24.
+Checks include strict TypeScript, concurrency and lifecycle tests, a real `SIGKILL`/restart test, durable SSE replay, authorization and filesystem boundary tests, and the Gemini SDK adapter over a mocked HTTP transport. Live Gemini inference requires your credentials and is not part of the offline test suite. Browser tests cover task creation, streaming, causal inspection, failed-step recovery, lifecycle controls, token access, sanitized responses, reconnect, and narrow layouts. GitHub Actions runs the same checks on Node 24 and uploads panel screenshots.
 
 ## Current scope
 
-This is a single-machine MVP with a runnable SDK/CLI/API. It has no dashboard, distributed scheduler, automatic desktop observation, sandboxed shell execution, or autonomous opportunity detection. Task priority is a transparent scheduling weight, not a learned estimate of task value. Google Search grounding is optional; otherwise research uses model knowledge and the tools/observations you supply.
+This is a single-machine MVP with a local panel and SDK/CLI/API. Distributed scheduling, automatic desktop observation, sandboxed shell execution, and autonomous opportunity detection remain outside the implemented scope. The existing toolset is unchanged in this panel milestone. Persistent source setup is proposed in [the monitoring plan](docs/monitoring-proposal.md); those adapters and setup forms are not implemented yet. Task priority is a transparent scheduling weight, not a learned estimate of task value. Google Search grounding is optional; otherwise research uses model knowledge and the tools/observations you supply.
 
 Model-generated confidence and citations are claims to inspect, not independent verification. `supported` is the model's assessment; the runtime downgrades unsupported empty evidence to `unverified`, but does not prove the references. Context selection is bounded (recent artifacts and observations); full history remains in SQLite. Logs have no automatic retention/compaction yet. See [architecture](docs/architecture.md) for exact recovery and scheduling limits.

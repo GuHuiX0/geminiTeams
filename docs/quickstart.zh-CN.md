@@ -34,7 +34,7 @@ npm start -- events TASK_ID
 
 `submit` 立即返回任务 ID；`--wait` 持续显示新的有效结果。`instant` 只调用一次模型，没有前置 Planner。默认 `focused` 先在交互通道处理，若确实需要深入，则先交付结果，再把后续工作转入后台通道。`deep` 可以并行探索。`persistent` 没有可做的事情就等待事件，不会不断调用模型。
 
-可用 `npm start -- serve --demo` 在无 Key 的情况下体验完整 CLI/API。需要联网研究时，`serve --ground-search` 为推理 Worker 开启 Gemini Google Search grounding，并保留模型返回的来源；可用性和费用取决于你的模型与账户。
+可用 `npm start -- serve --demo --db .living/panel-demo.sqlite` 在无 Key 的情况下体验本地面板、CLI 和 API。打开 **http://127.0.0.1:7331**，可新建任务、查看流式回复、检查执行依赖、筛选事件，以及暂停、恢复、重定向或取消任务。面板保留选中的任务和步骤，方便从监控进入理解、排错与干预。离线恢复场景还可演示只重试失败步骤、保留已完成工作。需要联网研究时，`serve --ground-search` 为推理 Worker 开启 Gemini Google Search grounding，并保留模型返回的来源；可用性和费用取决于你的模型与账户。
 
 ## 干预任务
 
@@ -72,4 +72,4 @@ npm start -- submit "阅读 notes.md，列出尚未解决的问题" --tools file
 
 `npm run check` 运行严格类型检查、测试和构建。测试包含真实进程强制终止后的恢复、并发隔离、任务重定向、事件回放及工具边界。Gemini SDK 通过模拟 HTTP 响应测试；真实推理需要你的 Key。
 
-当前是单机 SDK/CLI/API MVP，没有 Web 面板、分布式调度或自动桌面观察。更多运行保证与扩展方式见 [架构](architecture.md)、[API](api.md) 和 [扩展指南](extending.md)。
+当前是单机本地面板及 SDK/CLI/API MVP。工具集扩展暂缓；监控来源适配器的易用配置方案见 [监控提案](monitoring-proposal.md)，此阶段只完成方案，不自动开启监控。分布式调度和自动桌面观察尚未实现。更多运行保证与扩展方式见 [架构](architecture.md)、[API](api.md) 和 [扩展指南](extending.md)。
